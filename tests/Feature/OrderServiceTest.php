@@ -4,17 +4,20 @@ namespace Tests\Feature;
 
 use App\Contracts\PaymentGateway;
 use App\Models\Coupon;
+use App\Models\Order;
 use App\Models\Product;
 use App\Models\User;
 use App\Notifications\OrderCancelledNotification;
 use App\Notifications\OrderCreatedNotification;
 use App\Services\OrderService;
 use Carbon\Carbon;
+use Illuminate\Contracts\Auth\Authenticatable as UserContract;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Notification;
 use Mockery;
 use PHPUnit\Framework\Attributes\Test;
 use Tests\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 class OrderServiceTest extends TestCase
 {
@@ -310,5 +313,92 @@ class OrderServiceTest extends TestCase
         $this->assertSame(1500, $order->fresh()->total);
         $this->assertSame(500, $order->fresh()->discount);
         $this->assertSame(2000, $order->fresh()->subtotal);
+    }
+
+    #[Test]
+    #[DataProvider('invalidStatusesForConfirm')]
+    public function confirm_order_rejects_invalid_status(string $status): void
+    {
+        $gateway = Mockery::mock(PaymentGateway::class);
+        $service = new OrderService($gateway);
+        $order = Order::factory()->create(['status' => $status]);
+
+        $this->expectException(\LogicException::class);
+        $service->confirmOrder($order);
+    }
+
+    public static function invalidStatusesForConfirm(): array
+    {
+        return [
+            'confirmed' => ['confirmed'],
+            'delivered' => ['delivered'],
+            'cancelled' => ['cancelled'],
+        ];
+    }
+
+    #[Test]
+    #[DataProvider('InvalidStatusesForDelivery')]
+    public function delivery_order_rejects_invalid_status(string $status): void
+    {
+        $gateway = Mockery::mock(PaymentGateway::class);
+        $service = new OrderService($gateway);
+        $order = Order::factory()->create(['status' => $status]);
+        $this->expectException(\LogicException::class);
+        $service->deliverOrder($order);
+    }
+
+    public static function InvalidStatusesForDelivery(): array
+    {
+        return [
+            'delivered' => ['delivered'],
+            'cancelled' => ['cancelled'],
+            'pending' => ['pending'],
+        ];
+    }
+
+    #[Test]
+    #[DataProvider('invalidStatusesForCancel')]
+    public function cancel_order_rejects_invalid_status(string $status): void
+    {
+        $gateway = Mockery::mock(PaymentGateway::class);
+        $service = new OrderService($gateway);
+        $order = Order::factory()->create(['status' => $status]);
+        $this->expectException(\LogicException::class);
+        $service->cancelOrder($order);
+
+    }
+
+    public static function invalidStatusesForCancel(): array
+    {
+        return [
+            'delivered' => ['delivered'],
+        ];
+    }
+
+
+    #[Test]
+    public function create_order_rolls_back_on_failure(): void
+    {
+        $user = User::factory()->create();
+        $productOne = Product::factory()->create(['price' => 1000, 'stock' => 10]);
+        $productTwo = Product::factory()->create(['price' => 1000, 'stock' => 0]);
+        $gateway = Mockery::mock(PaymentGateway::class);
+        $service = new OrderService($gateway);
+
+        try {
+            $order = $service->createOrder($user, [
+                ['product_id' => $productOne->id, 'quantity' => 2],
+                ['product_id' => $productTwo->id, 'quantity' => 15],
+            ]);
+        } catch (\RuntimeException) {
+
+        }
+
+        $this->assertDatabaseHas('products', [
+            'id' => $productOne->id,
+            'stock' => 10,
+        ]);
+        $this->assertDatabaseCount('orders', 0);
+        $this->assertDatabaseMissing('orders', ['user_id' => $user->id]);
     }
 }
